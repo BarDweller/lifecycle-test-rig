@@ -17,36 +17,40 @@ mkdir -p ${OUTPUT_DIR}
 IMG_TAG=$1
 REGISTRY_HOST=$2
 
+CNB_USER_ID=1000
+CNB_GROUP_ID=1000
+
 # Create builder.toml this MUST correctly reference the builder base image, and run image
 # The stack id MUST match the ones in the CNB_STACK_ID env vars in builder base & run images.
 # We'll create the builder & run images to match this in a mo.
 #
 # Note that the stack defined here has a run image of ubi minimal, _without_ java.
 cat << EOF > ${OUTPUT_DIR}/builder.toml
-# Buildpacks to include in the builder... 
+# Buildpacks to include in the builder...
 # Dragging in the entire paketo java meta buildpack
 [[buildpacks]]
-  uri = "docker://gcr.io/paketo-buildpacks/java:7.7.0"
-  version = "7.7.0"
+  uri = "docker://gcr.io/paketo-buildpacks/nodejs:0.27.0"
+# used to test modified version of paketo buildpack
+# uri = "/home/user1/lifecycle-test-rig/nodejs/build/buildpackage.cnb"
+  version = "0.27.0"
 
 # Extensions to include in the builder.. 
 [[extensions]]
-    id = "redhat-runtimes/java"
+    id = "redhat-runtimes/nodejs"
     version = "0.0.1"
-    uri = "file://./extensions/redhat-runtimes_java/0.0.1"
-
+    uri = "file://./extensions/redhat-runtimes_nodejs/0.0.1"
 
 # Order for extension detection.
 [[order-extensions]]
   [[order-extensions.group]]
-    id = "redhat-runtimes/java"
+    id = "redhat-runtimes/nodejs"
     version = "0.0.1"
 
 # Order for buildpack detection.    
 [[order]]
   [[order.group]]
-    id = "paketo-buildpacks/java"
-    version = "7.7.0"    
+    id = "paketo-buildpacks/nodejs"
+    version = "0.27.0"
 
 # Override lifecycle version to release candidate with extension support
 [lifecycle]
@@ -64,8 +68,8 @@ EOF
 # This is the image that will be used 
 cat <<EOF > ${OUTPUT_DIR}/Dockerfile.run-java-image
 FROM registry.access.redhat.com/ubi8/openjdk-11-runtime:latest as base
-ENV CNB_USER_ID=1000
-ENV CNB_GROUP_ID=1000
+ENV CNB_USER_ID=${CNB_USER_ID}
+ENV CNB_GROUP_ID=${CNB_GROUP_ID}
 ENV CNB_STACK_ID="${IMG_TAG}"
 ENV CNB_STACK_DESC="ubi java run image base"
 LABEL io.buildpacks.stack.id="${IMG_TAG}"
@@ -78,12 +82,26 @@ FROM base as run
 USER \${CNB_USER_ID}:\${CNB_GROUP_ID}
 EOF
 
+# Create the dockerfile for the nodejs run image, in this case just
+# ubi8/nodejs-16-minimal with env vars and uid/gid set for use as a CNB run image.
+# This is the image that will be used
+cat <<EOF > ${OUTPUT_DIR}/Dockerfile.run-nodejs-image
+FROM registry.access.redhat.com/ubi8/nodejs-16-minimal as base
+ENV CNB_USER_ID=${CNB_USER_ID}
+ENV CNB_GROUP_ID=${CNB_GROUP_ID}
+ENV CNB_STACK_ID="${IMG_TAG}"
+ENV CNB_STACK_DESC="ubi nodejs run image base"
+LABEL io.buildpacks.stack.id="${IMG_TAG}"
+FROM base as run
+USER \${CNB_USER_ID}:\${CNB_GROUP_ID}
+EOF
+
 # Create the dockerfile for the base run image, in this case just ubi minimal, with env vars 
 # and uid/gid set for use as a CNB run image.
 cat <<EOF > ${OUTPUT_DIR}/Dockerfile.run-base-image
 FROM registry.access.redhat.com/ubi8/ubi-minimal:latest as base
-ENV CNB_USER_ID=1000
-ENV CNB_GROUP_ID=1000
+ENV CNB_USER_ID=${CNB_USER_ID}
+ENV CNB_GROUP_ID=${CNB_GROUP_ID}
 ENV CNB_STACK_ID="${IMG_TAG}"
 ENV CNB_STACK_DESC="ubi minimal run image base"
 LABEL io.buildpacks.stack.id="${IMG_TAG}"
@@ -101,8 +119,8 @@ EOF
 # In this case, we're using ubi minimal + env vars & uid/gid customization.
 cat <<EOF > ${OUTPUT_DIR}/Dockerfile.build-image
 FROM registry.access.redhat.com/ubi8/ubi-minimal:latest as base
-ENV CNB_USER_ID=1000
-ENV CNB_GROUP_ID=1000
+ENV CNB_USER_ID=${CNB_USER_ID}
+ENV CNB_GROUP_ID=${CNB_GROUP_ID}
 ENV CNB_STACK_ID="${IMG_TAG}"
 ENV CNB_STACK_DESC="ubi common builder base"
 LABEL io.buildpacks.stack.id="${IMG_TAG}"
@@ -119,12 +137,16 @@ echo -n ">>>>>>>>>> Removing old build/run image..."
 docker image rm $REGISTRY_HOST/builder-base:${IMG_TAG} --force
 docker image rm $REGISTRY_HOST/run-base:${IMG_TAG} --force
 docker image rm $REGISTRY_HOST/run-java:${IMG_TAG} --force
+docker image rm $REGISTRY_HOST/run-nodejs:${IMG_TAG} --force
 docker image rm $REGISTRY_HOST/builder:${IMG_TAG} --force
 
 # Patch the java run img tag into the generate script, so the run.Dockerfile
 # can be generated with the name of the run image we're defining in this script.
 echo -n ">>>>>>>>>> Patching generate script with image tag..."
 sed -i "s#^FROM localhost:5000/run-java:.*#FROM localhost:5000/run-java:${IMG_TAG}#" extensions/redhat-runtimes_java/0.0.1/bin/generate
+sed -i "s#^FROM localhost:5000/run-nodejs:.*#FROM localhost:5000/run-nodejs:${IMG_TAG}#" extensions/redhat-runtimes_nodejs/0.0.1/bin/generate
+sed -i "s#^CNB_USER_ID=.*#CNB_USER_ID=${CNB_USER_ID}#" extensions/redhat-runtimes_nodejs/0.0.1/bin/generate
+sed -i "s#^CNB_GROUP_ID=.*#CNB_GROUP_ID=${CNB_GROUP_ID}#" extensions/redhat-runtimes_nodejs/0.0.1/bin/generate
 
 # Use docker to create the images for builder-base & run. 
 echo ">>>>>>>>>> Building build base image..."
@@ -133,16 +155,22 @@ echo ">>>>>>>>>> Building run base image..."
 docker build . -t $REGISTRY_HOST/run-base:${IMG_TAG} --target run -f ${OUTPUT_DIR}/Dockerfile.run-base-image
 echo ">>>>>>>>>> Building run java image..."
 docker build . -t $REGISTRY_HOST/run-java:${IMG_TAG} --target run -f ${OUTPUT_DIR}/Dockerfile.run-java-image
+echo ">>>>>>>>>> Building run nodejs image..."
+docker build . -t $REGISTRY_HOST/run-nodejs:${IMG_TAG} --target run -f ${OUTPUT_DIR}/Dockerfile.run-nodejs-image
 
 # Use pack to consume the buider-base and output a viable builder image.
 echo ">>>>>>>>>> Pack creating builder image..."
 $PACK config experimental true
 $PACK builder create $REGISTRY_HOST/builder:${IMG_TAG} --config ${OUTPUT_DIR}/builder.toml
 
+RC=$?
+echo "builder rc : $RC"
+
 # Send all the currently built stuff off to the registry.
 docker push $REGISTRY_HOST/builder-base:${IMG_TAG}
 docker push $REGISTRY_HOST/run-base:${IMG_TAG}
 docker push $REGISTRY_HOST/run-java:${IMG_TAG}
+docker push $REGISTRY_HOST/run-nodejs:${IMG_TAG}
 docker push $REGISTRY_HOST/builder:${IMG_TAG}
 
 

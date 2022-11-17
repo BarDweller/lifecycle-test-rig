@@ -22,7 +22,8 @@ name = "jdk"
 name = "jre"
 EOF
 
+exit 0
 fi
 
-# Always detect
-exit 0
+# Not detected
+exit 100
